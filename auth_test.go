@@ -67,7 +67,7 @@ func TestAuthorizeNotVerified(t *testing.T) {
 	*serverAllowedIPs = []net.IP{}
 	*serverAllowedURIs = []string{}
 
-	assert.NotNil(t, verifyPeerCertificate(nil, nil), "conn w/o cert should be rejected")
+	assert.NotNil(t, verifyPeerCertificateServer(nil, nil), "conn w/o cert should be rejected")
 }
 
 func TestAuthorizeReject(t *testing.T) {
@@ -78,7 +78,7 @@ func TestAuthorizeReject(t *testing.T) {
 	*serverAllowedIPs = []net.IP{}
 	*serverAllowedURIs = []string{"test"}
 
-	assert.NotNil(t, verifyPeerCertificate(nil, fakeChains), "should reject cert w/o matching CN/OU")
+	assert.NotNil(t, verifyPeerCertificateServer(nil, fakeChains), "should reject cert w/o matching CN/OU")
 }
 
 func TestAuthorizeAllowAll(t *testing.T) {
@@ -88,7 +88,7 @@ func TestAuthorizeAllowAll(t *testing.T) {
 	*serverAllowedDNSs = []string{}
 	*serverAllowedIPs = []net.IP{}
 
-	assert.Nil(t, verifyPeerCertificate(nil, fakeChains), "allow-all should always allow authed clients")
+	assert.Nil(t, verifyPeerCertificateServer(nil, fakeChains), "allow-all should always allow authed clients")
 }
 
 func TestAuthorizeAllowCN(t *testing.T) {
@@ -99,7 +99,7 @@ func TestAuthorizeAllowCN(t *testing.T) {
 	*serverAllowedIPs = []net.IP{}
 	*serverAllowedURIs = []string{}
 
-	assert.Nil(t, verifyPeerCertificate(nil, fakeChains), "allow-cn should allow clients with matching CN")
+	assert.Nil(t, verifyPeerCertificateServer(nil, fakeChains), "allow-cn should allow clients with matching CN")
 }
 
 func TestAuthorizeAllowOU(t *testing.T) {
@@ -110,7 +110,7 @@ func TestAuthorizeAllowOU(t *testing.T) {
 	*serverAllowedIPs = []net.IP{}
 	*serverAllowedURIs = []string{}
 
-	assert.Nil(t, verifyPeerCertificate(nil, fakeChains), "allow-ou should allow clients with matching OU")
+	assert.Nil(t, verifyPeerCertificateServer(nil, fakeChains), "allow-ou should allow clients with matching OU")
 }
 
 func TestAuthorizeAllowDNS(t *testing.T) {
@@ -121,7 +121,7 @@ func TestAuthorizeAllowDNS(t *testing.T) {
 	*serverAllowedIPs = []net.IP{}
 	*serverAllowedURIs = []string{}
 
-	assert.Nil(t, verifyPeerCertificate(nil, fakeChains), "allow-dns-san should allow clients with matching DNS SAN")
+	assert.Nil(t, verifyPeerCertificateServer(nil, fakeChains), "allow-dns-san should allow clients with matching DNS SAN")
 }
 
 func TestAuthorizeAllowIP(t *testing.T) {
@@ -132,7 +132,79 @@ func TestAuthorizeAllowIP(t *testing.T) {
 	*serverAllowedIPs = []net.IP{net.IPv4(192, 168, 99, 100)}
 	*serverAllowedURIs = []string{}
 
-	assert.Nil(t, verifyPeerCertificate(nil, fakeChains), "allow-ip-san should allow clients with matching IP SAN")
+	assert.Nil(t, verifyPeerCertificateServer(nil, fakeChains), "allow-ip-san should allow clients with matching IP SAN")
+}
+
+func TestVerifyAllowCN(t *testing.T) {
+	*clientAllowedCNs = []string{"gopher"}
+	*clientAllowedOUs = []string{}
+	*clientAllowedDNSs = []string{}
+	*clientAllowedIPs = []net.IP{}
+
+	assert.Nil(t, verifyPeerCertificateClient(nil, fakeChains), "verify-cn should allow servers with matching CN")
+}
+
+func TestVerifyAllowOU(t *testing.T) {
+	*clientAllowedCNs = []string{}
+	*clientAllowedOUs = []string{"circle"}
+	*clientAllowedDNSs = []string{}
+	*clientAllowedIPs = []net.IP{}
+
+	assert.Nil(t, verifyPeerCertificateClient(nil, fakeChains), "verify-ou should allow servers with matching OU")
+}
+
+func TestVerifyAllowDNS(t *testing.T) {
+	*clientAllowedCNs = []string{}
+	*clientAllowedOUs = []string{}
+	*clientAllowedDNSs = []string{"circle"}
+	*clientAllowedIPs = []net.IP{}
+
+	assert.Nil(t, verifyPeerCertificateClient(nil, fakeChains), "verify-dns-san should allow servers with matching DNS SAN")
+}
+
+func TestVerifyAllowIP(t *testing.T) {
+	*clientAllowedCNs = []string{}
+	*clientAllowedOUs = []string{}
+	*clientAllowedDNSs = []string{}
+	*clientAllowedIPs = []net.IP{net.IPv4(192, 168, 99, 100)}
+
+	assert.Nil(t, verifyPeerCertificateClient(nil, fakeChains), "verify-ip-san should allow servers with matching IP SAN")
+}
+
+func TestVerifyRejectCN(t *testing.T) {
+	*clientAllowedCNs = []string{"test"}
+	*clientAllowedOUs = []string{}
+	*clientAllowedDNSs = []string{}
+	*clientAllowedIPs = []net.IP{}
+
+	assert.NotNil(t, verifyPeerCertificateClient(nil, fakeChains), "should reject cert w/o matching CN")
+}
+
+func TestVerifyRejectOU(t *testing.T) {
+	*clientAllowedCNs = []string{}
+	*clientAllowedOUs = []string{"test"}
+	*clientAllowedDNSs = []string{}
+	*clientAllowedIPs = []net.IP{}
+
+	assert.NotNil(t, verifyPeerCertificateClient(nil, fakeChains), "should reject cert w/o matching OU")
+}
+
+func TestVerifyRejectDNS(t *testing.T) {
+	*clientAllowedCNs = []string{}
+	*clientAllowedOUs = []string{}
+	*clientAllowedDNSs = []string{"test"}
+	*clientAllowedIPs = []net.IP{}
+
+	assert.NotNil(t, verifyPeerCertificateClient(nil, fakeChains), "should reject cert w/o matching DNS SAN")
+}
+
+func TestVerifyRejectIP(t *testing.T) {
+	*clientAllowedCNs = []string{}
+	*clientAllowedOUs = []string{}
+	*clientAllowedDNSs = []string{}
+	*clientAllowedIPs = []net.IP{net.IPv4(1, 1, 1, 1)}
+
+	assert.NotNil(t, verifyPeerCertificateClient(nil, fakeChains), "should reject cert w/o matching IP SAN")
 }
 
 func TestAuthorizeAllowURI(t *testing.T) {
@@ -145,7 +217,7 @@ func TestAuthorizeAllowURI(t *testing.T) {
 	*serverAllowedIPs = []net.IP{}
 	*serverAllowedURIs = []string{"spiffe://dev.acme.com/path/service"}
 
-	assert.Nil(t, verifyPeerCertificate(nil, chainsWithURI), "allow-uri-san should allow clients with matching URI SAN")
+	assert.Nil(t, verifyPeerCertificateServer(nil, chainsWithURI), "allow-uri-san should allow clients with matching URI SAN")
 }
 
 func TestAuthorizeRejectURI(t *testing.T) {
@@ -158,5 +230,5 @@ func TestAuthorizeRejectURI(t *testing.T) {
 	*serverAllowedIPs = []net.IP{}
 	*serverAllowedURIs = []string{"spiffe://invalid"}
 
-	assert.NotNil(t, verifyPeerCertificate(nil, chainsWithURI), "should reject cert w/o matching URI")
+	assert.NotNil(t, verifyPeerCertificateServer(nil, chainsWithURI), "should reject cert w/o matching URI")
 }

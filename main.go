@@ -41,7 +41,7 @@ import (
 )
 
 var (
-	version              = "v1.0.6"
+	version              = "v1.1.2"
 	defaultMetricsPrefix = "ghostunnel"
 )
 
@@ -66,9 +66,13 @@ var (
 	clientUnsafeListen   = clientCommand.Flag("unsafe-listen", "If set, does not limit listen to localhost, 127.0.0.1, [::1], or UNIX sockets.").Bool()
 	clientServerName     = clientCommand.Flag("override-server-name", "If set, overrides the server name used for hostname verification.").PlaceHolder("NAME").String()
 	clientConnectProxy   = clientCommand.Flag("connect-proxy", "If set, connect to target over given HTTP CONNECT proxy. Must be HTTP/HTTPS URL.").PlaceHolder("URL").URL()
+	clientAllowedCNs     = clientCommand.Flag("verify-cn", "Allow servers with given common name (can be repeated).").PlaceHolder("CN").Strings()
+	clientAllowedOUs     = clientCommand.Flag("verify-ou", "Allow servers with given organizational unit name (can be repeated).").PlaceHolder("OU").Strings()
+	clientAllowedDNSs    = clientCommand.Flag("verify-dns-san", "Allow servers with given DNS subject alternative name (can be repeated).").PlaceHolder("SAN").Strings()
+	clientAllowedIPs     = clientCommand.Flag("verify-ip-san", "Allow servers with given IP subject alternative name (can be repeated).").PlaceHolder("SAN").IPList()
 
 	// TLS options
-	keystorePath        = app.Flag("keystore", "Path to certificate and keystore (PEM, PKCS12).").PlaceHolder("PATH").Required().String()
+	keystorePath        = app.Flag("keystore", "Path to certificate and keystore (PEM with certificate/key, or PKCS12).").PlaceHolder("PATH").Required().String()
 	keystorePass        = app.Flag("storepass", "Password for certificate and keystore (optional).").PlaceHolder("PASS").String()
 	caBundlePath        = app.Flag("cacert", "Path to CA bundle file (PEM/X509). Uses system trust store by default.").String()
 	enabledCipherSuites = app.Flag("cipher-suites", "Set of cipher suites to enable, comma-separated, in order of preference (AES, CHACHA).").Default("AES,CHACHA").String()
@@ -82,7 +86,7 @@ var (
 	metricsGraphite = app.Flag("metrics-graphite", "Collect metrics and report them to the given graphite instance (raw TCP).").PlaceHolder("ADDR").TCP()
 	metricsURL      = app.Flag("metrics-url", "Collect metrics and POST them periodically to the given URL (via HTTP/JSON).").PlaceHolder("URL").String()
 	metricsPrefix   = app.Flag("metrics-prefix", fmt.Sprintf("Set prefix string for all reported metrics (default: %s).", defaultMetricsPrefix)).PlaceHolder("PREFIX").Default(defaultMetricsPrefix).String()
-	metricsInterval = app.Flag("metrics-interval", "Collect (and post) metrics every specified interval.").Default("30s").Duration()
+	metricsInterval = app.Flag("metrics-interval", "Collect (and post/send) metrics every specified interval.").Default("30s").Duration()
 
 	// Status & logging
 	statusAddress = app.Flag("status", "Enable serving /_status and /_metrics on given HOST:PORT (or unix:SOCKET).").PlaceHolder("ADDR").String()
@@ -182,6 +186,9 @@ func clientValidateFlags() error {
 	if !*clientUnsafeListen && !validateUnixOrLocalhost(*clientListenAddress) {
 		return fmt.Errorf("--listen must be unix:PATH, localhost:PORT, 127.0.0.1:PORT or [::1]:PORT (unless --unsafe-listen is set)")
 	}
+	if *clientConnectProxy != nil && (*clientConnectProxy).Scheme != "http" && (*clientConnectProxy).Scheme != "https" {
+		return fmt.Errorf("invalid CONNECT proxy %s, must have HTTP or HTTPS connection scheme", (*clientConnectProxy).String())
+	}
 
 	for _, suite := range strings.Split(*enabledCipherSuites, ",") {
 		_, ok := cipherSuites[strings.TrimSpace(suite)]
@@ -207,6 +214,8 @@ func run(args []string) error {
 	app.Version(fmt.Sprintf("rev %s built with %s", version, runtime.Version()))
 	app.Validate(validateFlags)
 	command := kingpin.MustParse(app.Parse(args))
+
+	logger.Printf("starting ghostunnel in %s mode", command)
 
 	// metrics
 	if *metricsGraphite != nil {
@@ -252,13 +261,13 @@ func run(args []string) error {
 			fmt.Fprintf(os.Stderr, "error: %s\n", err)
 			return err
 		}
-		logger.Printf("starting ghostunnel in server mode")
 
 		dial, err := serverBackendDialer()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: invalid target address: %s\n", err)
 			return err
 		}
+		logger.Printf("using target address %s", *serverForwardAddress)
 
 		status := newStatusHandler(dial)
 		context := &Context{watcher, status, nil, dial, metrics, cert}
@@ -275,13 +284,13 @@ func run(args []string) error {
 			fmt.Fprintf(os.Stderr, "error: %s\n", err)
 			return err
 		}
-		logger.Printf("starting ghostunnel in client mode")
 
 		network, address, host, err := parseUnixOrTCPAddress(*clientForwardAddress)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: invalid target address: %s\n", err)
 			return err
 		}
+		logger.Printf("using target address %s", *clientForwardAddress)
 
 		dial, err := clientBackendDialer(cert, network, address, host)
 		if err != nil {
@@ -316,7 +325,7 @@ func serverListen(context *Context) error {
 	}
 
 	config.GetCertificate = context.cert.getCertificate
-	config.VerifyPeerCertificate = verifyPeerCertificate
+	config.VerifyPeerCertificate = verifyPeerCertificateServer
 
 	listener, err := reuseport.NewReusablePortListener("tcp", (*serverListenAddress).String())
 	if err != nil {
@@ -341,6 +350,8 @@ func serverListen(context *Context) error {
 			return err
 		}
 	}
+
+	logger.Printf("listening for connections on %s", (*serverListenAddress).String())
 
 	go proxy.accept()
 
@@ -385,6 +396,8 @@ func clientListen(context *Context) error {
 			return err
 		}
 	}
+
+	logger.Printf("listening for connections on %s", *clientListenAddress)
 
 	go proxy.accept()
 
@@ -472,10 +485,14 @@ func clientBackendDialer(cert *certificate, network, address, host string) (func
 		config.ServerName = *clientServerName
 	}
 
+	config.VerifyPeerCertificate = verifyPeerCertificateClient
+
 	var dialer Dialer
 	dialer = &net.Dialer{Timeout: *timeoutDuration}
 
 	if *clientConnectProxy != nil {
+		logger.Printf("using HTTP(S) CONNECT proxy %s", (*clientConnectProxy).String())
+
 		// Use HTTP CONNECT proxy to connect to target.
 		proxyConfig, err := buildConfig(*caBundlePath)
 		if err != nil {

@@ -74,6 +74,21 @@ func (c *certificate) getCertificate(clientHello *tls.ClientHelloInfo) (*tls.Cer
 
 // Reload certificate
 func (c *certificate) reload() error {
+	var err error
+	if hasPKCS11() {
+		err = c.reloadFromPKCS11()
+	} else {
+		err = c.reloadFromPEM()
+	}
+
+	if err == nil {
+		cert, _ := c.getCertificate(nil)
+		logger.Printf("loaded certificate with common name '%s'", cert.Leaf.Subject.CommonName)
+	}
+	return err
+}
+
+func (c *certificate) reloadFromPEM() error {
 	keystore, err := os.Open(c.keystorePath)
 	if err != nil {
 		return err
@@ -106,6 +121,49 @@ func (c *certificate) reload() error {
 	certAndKey.Leaf, err = x509.ParseCertificate(certAndKey.Certificate[0])
 	if err != nil {
 		return err
+	}
+
+	atomic.StorePointer(&c.cached, unsafe.Pointer(&certAndKey))
+	return nil
+}
+
+func (c *certificate) reloadFromPKCS11() error {
+	// Expecting keystore file to only have certificate,
+	// with the private key being in an HSM/PKCS11 module.
+	keystore, err := os.Open(c.keystorePath)
+	if err != nil {
+		return err
+	}
+
+	certAndKey := tls.Certificate{}
+	err = certigo.ReadAsX509FromFiles(
+		[]*os.File{keystore}, "", nil,
+		func(cert *x509.Certificate, err error) {
+			if err != nil {
+				logger.Printf("error during keystore read: %s", err)
+				return
+			}
+			if certAndKey.Leaf == nil {
+				certAndKey.Leaf = cert
+			}
+			certAndKey.Certificate = append(certAndKey.Certificate, cert.Raw)
+		})
+	if err != nil {
+		return err
+	}
+
+	// Reuse previously loaded PKCS11 private key if we already have it. We want to
+	// avoid reloading the key every time the cert reloads, as it's a potentially
+	// expensive operation that calls out into a shared library.
+	if c.cached != nil {
+		old, _ := c.getCertificate(nil)
+		certAndKey.PrivateKey = old.PrivateKey
+	} else {
+		privateKey, err := newPKCS11(certAndKey.Leaf.PublicKey)
+		if err != nil {
+			return err
+		}
+		certAndKey.PrivateKey = privateKey
 	}
 
 	atomic.StorePointer(&c.cached, unsafe.Pointer(&certAndKey))
@@ -181,15 +239,10 @@ func buildConfig(caBundlePath string) (*tls.Config, error) {
 	for _, suite := range strings.Split(*enabledCipherSuites, ",") {
 		ciphers, ok := cipherSuites[strings.TrimSpace(suite)]
 		if !ok {
-			return nil, fmt.Errorf("invalid cipher suite %s selected", suite)
+			return nil, fmt.Errorf("invalid cipher suite '%s' selected", suite)
 		}
 
-		logger.Printf("enabling cipher suites for '%s' (%d cipher suites)", suite, len(ciphers))
 		suites = append(suites, ciphers...)
-	}
-
-	if len(suites) == 0 {
-		return nil, fmt.Errorf("no cipher suites selected? aborting")
 	}
 
 	return &tls.Config{
