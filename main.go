@@ -36,6 +36,7 @@ import (
 	"github.com/kavu/go_reuseport"
 	"github.com/mwitkow/go-http-dialer"
 	"github.com/rcrowley/go-metrics"
+	spiffe_tls "github.com/spiffe/go-spiffe/tls"
 	"github.com/square/go-sq-metrics"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
@@ -71,6 +72,7 @@ var (
 	clientAllowedDNSs    = clientCommand.Flag("verify-dns-san", "Allow servers with given DNS subject alternative name (can be repeated).").PlaceHolder("SAN").Strings()
 	clientAllowedIPs     = clientCommand.Flag("verify-ip-san", "Allow servers with given IP subject alternative name (can be repeated).").PlaceHolder("SAN").IPList()
 	clientAllowedURIs    = clientCommand.Flag("verify-uri-san", "Allow servers with given URI subject alternative name (can be repeated).").PlaceHolder("SAN").Strings()
+	clientAllowedSPIFFEIDs = clientCommand.Flag("verify-spiffe-id", "Allow servers with given SPIFFE ID (can be repeated).").PlaceHolder("SPIFFEID").Strings()
 
 	// TLS options
 	keystorePath        = app.Flag("keystore", "Path to certificate and keystore (PEM with certificate/key, or PKCS12).").PlaceHolder("PATH").Required().String()
@@ -490,18 +492,36 @@ func serverBackendDialer() (func() (net.Conn, error), error) {
 
 // Get backend dialer function in client mode (connecting to a TLS port)
 func clientBackendDialer(cert *certificate, network, address, host string) (func() (net.Conn, error), error) {
-	config, err := buildConfig(*caBundlePath)
-	if err != nil {
-		return nil, err
-	}
+	var config *tls.Config
 
-	if *clientServerName == "" {
-		config.ServerName = host
+	if len(*clientAllowedSPIFFEIDs) > 0 {
+		certPool, err := caBundle(*caBundlePath)
+		if err != nil {
+			return nil, err
+		}
+
+		spiffePeer := &spiffe_tls.TLSPeer{
+			SpiffeIDs:  *clientAllowedSPIFFEIDs,
+			TrustRoots: certPool,
+		}
+
+		crt, _ := cert.getCertificate(nil)
+		config = spiffePeer.NewTLSConfig([]tls.Certificate{*crt})
 	} else {
-		config.ServerName = *clientServerName
-	}
+		var err error
+		config, err = buildConfig(*caBundlePath)
+		if err != nil {
+			return nil, err
+		}
 
-	config.VerifyPeerCertificate = verifyPeerCertificateClient
+		if *clientServerName == "" {
+			config.ServerName = host
+		} else {
+			config.ServerName = *clientServerName
+		}
+
+		config.VerifyPeerCertificate = verifyPeerCertificateClient
+	}
 
 	var dialer Dialer = &net.Dialer{Timeout: *timeoutDuration}
 
@@ -513,7 +533,10 @@ func clientBackendDialer(cert *certificate, network, address, host string) (func
 		if err != nil {
 			return nil, err
 		}
-		config.ClientAuth = tls.NoClientCert
+
+		if len(*clientAllowedSPIFFEIDs) == 0 {
+			config.ClientAuth = tls.NoClientCert
+		}
 
 		dialer = http_dialer.New(
 			*clientConnectProxy,
